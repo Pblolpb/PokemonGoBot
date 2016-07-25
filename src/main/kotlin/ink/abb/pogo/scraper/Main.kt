@@ -8,101 +8,140 @@
 
 package ink.abb.pogo.scraper
 
+import POGOProtos.Enums.PokemonIdOuterClass.PokemonId
+import POGOProtos.Inventory.Item.ItemIdOuterClass.ItemId
+import ink.abb.pogo.scraper.services.BotRunService
 import ink.abb.pogo.scraper.util.Log
-import POGOProtos.Networking.Envelopes.RequestEnvelopeOuterClass
-import com.pokegoapi.api.PokemonGo
-import com.pokegoapi.auth.GoogleLogin
-import com.pokegoapi.auth.PtcLogin
-import okhttp3.OkHttpClient
-import java.io.FileInputStream
-import java.net.InetSocketAddress
-import java.net.Proxy
-import java.security.cert.X509Certificate
-import java.util.*
-import java.util.concurrent.TimeUnit
-import javax.net.ssl.SSLContext
-import javax.net.ssl.TrustManager
-import javax.security.cert.CertificateException
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
+import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.boot.SpringApplication
+import org.springframework.boot.autoconfigure.SpringBootApplication
+import java.io.File
+import java.util.Base64
+import java.util.Properties
+import javax.annotation.PostConstruct
+import kotlin.reflect.companionObject
 
 /**
  * Allow all certificate to debug with https://github.com/bettse/mitmdump_decoder
  */
-fun allowProxy(builder: OkHttpClient.Builder) {
-    builder.proxy(Proxy(Proxy.Type.HTTP, InetSocketAddress.createUnresolved("localhost", 8888)))
-    val trustAllCerts = arrayOf<TrustManager>(object : javax.net.ssl.X509TrustManager {
-        override fun getAcceptedIssuers(): Array<out X509Certificate> {
-            return emptyArray()
+@SpringBootApplication
+open class Main {
+
+    @Autowired
+    lateinit var botRunService: BotRunService
+
+    @PostConstruct
+    fun createBot() {
+        val names = botRunService.getSaveNames()
+
+        if(names.size < 1) {
+            val configProperties = File("config.properties")
+            if(!configProperties.isFile) {
+                throw IllegalStateException("No bot saves found and no config.properties to convert!")
+            }
+
+            val properties = Properties()
+            configProperties.reader().use {
+                properties.load(it)
+            }
+
+            val username = properties.getProperty("username", "")
+            val password = if (properties.containsKey("password")) properties.getProperty("password") else String(Base64.getDecoder().decode(properties.getProperty("base64_password", "")))
+            val token = properties.getProperty("token", "")
+
+            val credentials = if(username.isEmpty() || username.contains('@')) {
+                Settings.GoogleCredentials(token)
+            } else {
+                Settings.PokemonTrainersClubCredentials(username, password, token)
+            }
+
+            botRunService.submitBot(Settings(
+                name = "config-properties-conversion",
+                credentials = credentials,
+                startingLatitude = getPropertyOrDie(properties, "Starting Latitude", "latitude", String::toDouble),
+                startingLongitude = getPropertyOrDie(properties, "Starting Longitude", "longitude", String::toDouble),
+                desiredCatchProbability = getPropertyIfSet(properties, "Catch Probability", "desired_catch_probability", 0.8, String::toDouble),
+                speed = getPropertyIfSet(properties, "Speed", "speed", 2.778, String::toDouble),
+                shouldHatchEggs = getPropertyIfSet(properties, "Should Hatch Eggs", "should_hatch_eggs", true, String::toBoolean),
+
+                shouldDropItems = getPropertyIfSet(properties, "Item Drop", "drop_items", false, String::toBoolean),
+                //TODO = getPropertyIfSet(properties, "Revive", "item_revive", 20, String::toInt),
+                //TODO = getPropertyIfSet(properties, "Max Revive", "item_max_revive", 10, String::toInt),
+                //TODO = getPropertyIfSet(properties, "Potion", "item_potion", 0, String::toInt),
+                //TODO = getPropertyIfSet(properties, "Super Potion", "item_super_potion", 30, String::toInt),
+                //TODO = getPropertyIfSet(properties, "Hyper Potion", "item_max_potion", 50, String::toInt),
+                //TODO = getPropertyIfSet(properties, "Max Potion", "item_poke_ball", 50, String::toInt),
+                //TODO = getPropertyIfSet(properties, "Poke Ball", "item_great_ball", 50, String::toInt),
+                //TODO = getPropertyIfSet(properties, "Great Ball", "item_ultra_ball", 50, String::toInt),
+                //TODO = getPropertyIfSet(properties, "Ultra Ball", "item_ultra_ball", 50, String::toInt),
+                //TODO = getPropertyIfSet(properties, "Master Ball", "item_master_ball", -1, String::toInt),
+                //TODO = getPropertyIfSet(properties, "Razzberry", "item_razz_berry", 50, String::toInt),
+
+                preferredBall = getPropertyIfSet(properties, "Preferred Ball", "preferred_ball", ItemId.ITEM_POKE_BALL, ItemId::valueOf),
+
+                shouldDisplayKeepalive = getPropertyIfSet(properties, "Display Keepalive Coordinates", "display_keepalive", true, String::toBoolean),
+                shouldDisplayPokestopName = getPropertyIfSet(properties, "Display Pokestop Name", "display_pokestop_name", true, String::toBoolean),
+                shouldDisplayWalkingToNearestUnused = getPropertyIfSet(properties, "Display Walking to Nearest Unused Pokestop", "display_nearest_unused", true, String::toBoolean),
+                shouldDisplayPokestopSpinRewards = getPropertyIfSet(properties, "Display Pokestop Rewards", "display_pokestop_rewards", true, String::toBoolean),
+                shouldDisplayPokemonCatchRewards = getPropertyIfSet(properties, "Display Pokemon Catch Rewards", "display_pokemon_catch_rewards", true, String::toBoolean),
+
+                shouldAutoTransfer = getPropertyIfSet(properties, "Autotransfer", "autotransfer", false, String::toBoolean),
+                keepPokemonAmount = getPropertyIfSet(properties, "Keep Pokemon Amount", "keep_pokemon_amount", 1, String::toInt),
+                sortByIV = getPropertyIfSet(properties, "Sort by IV first instead of CP", "sort_by_iv", false, String::toBoolean),
+                transferIVThreshold = getPropertyIfSet(properties, "Minimum IV to keep a pokemon", "transfer_iv_threshold", 80, String::toInt),
+                transferCPThreshold = getPropertyIfSet(properties, "Minimum CP to keep a pokemon", "transfer_cp_threshold", 400, String::toInt),
+                walkOnly = getPropertyIfSet(properties, "Only hatch eggs, no catching", "walk_only", false, String::toBoolean),
+                ignoredPokemon = getPropertyIfSet(properties, "Never transfer these Pokemon", "ignored_pokemon", "MISSINGNO", String::toString).split(",").map { PokemonId.valueOf(it) },
+                obligatoryTransfer = getPropertyIfSet(properties, "List of pokemon you always want to transfer regardless of CP", "obligatory_transfer", "DODUO,RATTATA,CATERPIE,PIDGEY", String::toString).split(",").map { PokemonId.valueOf(it) }
+            ))
+        } else {
+            names.map { botRunService.load(it) }.forEach { botRunService.submitBot(it) }
+        }
+    }
+
+    private fun <T> getPropertyOrDie(properties: Properties, description: String, property: String, conversion: (String) -> T): T {
+        val settingString = "$description setting (\"$property\")"
+
+        if (!properties.containsKey(property)) {
+            Log.red("$settingString not specified in config.properties!")
+            System.exit(1)
         }
 
-        @Throws(CertificateException::class)
-        override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {
+        return conversion(properties.getProperty(property))
+    }
+
+    private fun <T> getPropertyIfSet(properties: Properties, description: String, property: String, default: T, conversion: (String) -> T): T {
+        val settingString = "$description setting (\"$property\")"
+        val defaulting = "defaulting to \"$default\""
+
+        if (!properties.containsKey(property)) {
+            Log.red("$settingString not specified, $defaulting.")
+            return default
         }
 
-        @Throws(CertificateException::class)
-        override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {
+        try {
+            return conversion(properties.getProperty(property))
+        } catch (e: Exception) {
+            Log.red("$settingString is invalid, defaulting to $default: ${e.message}")
+            return default
         }
-    })
+    }
+}
 
-    // Install the all-trusting trust manager
-    val sslContext = SSLContext.getInstance("SSL")
-    sslContext.init(null, trustAllCerts, java.security.SecureRandom())
-    // Create an ssl socket factory with our all-trusting manager
-    val sslSocketFactory = sslContext.socketFactory
+fun <R : Any> R.logger(): Lazy<Logger> {
+    return lazy { LoggerFactory.getLogger(unwrapCompanionClass(this.javaClass).name) }
+}
 
-    builder.sslSocketFactory(sslSocketFactory)
-    builder.hostnameVerifier { hostname, session -> true }
+fun <T: Any> unwrapCompanionClass(ofClass: Class<T>): Class<*> {
+    return if (ofClass.enclosingClass != null && ofClass.enclosingClass.kotlin.companionObject?.java == ofClass) {
+        ofClass.enclosingClass
+    } else {
+        ofClass
+    }
 }
 
 fun main(args: Array<String>) {
-    val builder = OkHttpClient.Builder()
-    // allowProxy(builder)
-    builder.connectTimeout(60, TimeUnit.SECONDS)
-    builder.readTimeout(60, TimeUnit.SECONDS)
-    builder.writeTimeout(60, TimeUnit.SECONDS)
-    val http = builder.build()
-
-    val properties = Properties()
-    FileInputStream("config.properties").use {
-        properties.load(it)
-    }
-
-    val settings = Settings(properties)
-
-    val username = settings.username
-    val password = settings.password
-
-    val token = settings.token
-
-    Log.normal("Logging in to game server...")
-    val auth: RequestEnvelopeOuterClass.RequestEnvelope.AuthInfo
-
-    auth = if (token.isBlank()) {
-        if (username.contains('@')) {
-            GoogleLogin(http).login(username, password)
-        } else {
-            PtcLogin(http).login(username, password)
-        }
-    } else {
-        if (token.contains("pokemon.com")) {
-            PtcLogin(http).login(token)
-        } else {
-            GoogleLogin(http).login(token)
-        }
-    }
-
-    Log.normal("Logged in as $username with token ${auth.token.contents}")
-
-    if (token.isBlank()) {
-        Log.normal("Set this token in your config to log in directly")
-    }
-    val api = PokemonGo(auth, http)
-
-    print("Getting profile data from pogo server")
-    while (api.playerProfile == null) {
-        print(".")
-        Thread.sleep(1000)
-    }
-    println(".")
-
-    Bot(api, settings).run()
+    SpringApplication.run(Main::class.java, *args)
 }
